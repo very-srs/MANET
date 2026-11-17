@@ -224,64 +224,92 @@ PKG_MGR=""          # apt | dnf | pacman | zypper | apk | ""
 # that boots stock Raspberry Pi OS and never becomes a mesh node. Ubuntu 22.04
 # still ships 1.7.2.
 #
+# Offline setup also copies files onto the card after the imager has written
+# it. The imager ejects the card when it finishes unless it is given
+# --disable-eject, which 1.9.0 added, so offline setup needs 1.9 or later.
+#
 # Rather than install over whatever the system has, a usable copy is found in
 # this order and the first match wins:
 #
-#   1. a copy in this folder, if it is newer than the system one
-#   2. the system rpi-imager, if it actually works
-#   3. the package manager, when it offers 1.8 or later
-#   4. the AppImage from raspberrypi.org, extracted into this folder
+#   1. a copy this flasher unpacked earlier, if it is newer than the system one
+#   2. the system rpi-imager, if it works for this run
+#   3. the package manager, when it offers a new enough version
+#   4. the AppImage pinned in flasher-tools.json, from the offline kit when
+#      there is one and downloaded otherwise, checked and unpacked for this
+#      flasher
 #
 # Nothing here replaces a working system install. That is deliberate: doing so
 # once cost a working machine its imager.
 RPI_IMAGER_MIN_VERSION="1.8.0"
-RPI_IMAGER_APPIMAGE_URL="https://downloads.raspberrypi.org/imager/imager_latest_amd64.AppImage"
-RPI_IMAGER_LOCAL_DIR="imager"
+RPI_IMAGER_OFFLINE_MIN_VERSION="1.9.0"
+FLASHER_TOOLS_FILE="$SCRIPT_DIR/flasher-tools.json"
+# An unpacked imager holds symbolic links, which a FAT32 USB stick cannot
+# store, so a kit run unpacks into this computer's cache instead of the kit.
+if [ -n "$KIT_DIR" ]; then
+    RPI_IMAGER_LOCAL_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/manet-flasher/imager"
+else
+    RPI_IMAGER_LOCAL_DIR="$PWD/imager"
+fi
 RPI_IMAGER_CMD=""
 
-local_imager_path() { printf '%s' "$PWD/$RPI_IMAGER_LOCAL_DIR/squashfs-root/AppRun"; }
+local_imager_path() { printf '%s' "$RPI_IMAGER_LOCAL_DIR/squashfs-root/AppRun"; }
+
+# The oldest rpi-imager this run can use.
+imager_need() {
+    if [ "$OFFLINE" = 1 ]; then echo "$RPI_IMAGER_OFFLINE_MIN_VERSION"; else echo "$RPI_IMAGER_MIN_VERSION"; fi
+}
+
+# Run an imager to ask it something, never to write: no device is given. Its
+# output goes to stdout whatever it exits with. 2.x registers a URL handler
+# naming whichever copy answered, so it gets a throwaway data folder for that.
+imager_ask() {
+    local data
+    data=$(mktemp -d 2>/dev/null) || data=""
+    QT_QPA_PLATFORM=offscreen XDG_DATA_HOME="${data:-${XDG_DATA_HOME:-}}" "$@" 2>&1 || true
+    [ -z "$data" ] || rm -rf "$data"
+}
 
 # Two formats are in the wild and both print on stderr:
 #   rpi-imager version 1.7.2        (1.x)
 #   Raspberry Pi Imager v2.0.11.1   (2.x)
 imager_version_of() {
     [ -x "$1" ] || return 1
-    QT_QPA_PLATFORM=offscreen "$1" --version 2>&1 \
+    imager_ask "$1" --version \
         | sed -n -E 's/.*[Vv]ersion[[:space:]]+([0-9][0-9.]*).*/\1/p;s/.*[[:space:]]v([0-9]+\.[0-9][0-9.]*).*/\1/p' \
         | head -1
 }
 
-# usable | too-old | broken. Asks the binary instead of trusting a version,
-# because a package built for a newer distribution than the host dies in the
-# dynamic loader before parsing arguments, which a version check reads as fine.
-# No device is given, so nothing can be written either way.
+# Whether the imager takes --disable-eject. Older builds reject it as an
+# unknown option.
+imager_keeps_card() {
+    ! imager_ask "$1" --cli --disable-eject --first-run-script /dev/null \
+        | grep -qi "unknown option.*disable-eject"
+}
+
+# usable | too-old | ejects | broken, for this run. Asks the binary instead of
+# trusting a version, because a package built for a newer distribution than
+# the host dies in the dynamic loader before parsing arguments, which a
+# version check reads as fine. "ejects" is an imager that would do for a
+# normal flash but not for offline setup.
 imager_state_of() {
     local bin="$1" out
     [ -n "$bin" ] && [ -x "$bin" ] || { echo broken; return; }
-    out=$(QT_QPA_PLATFORM=offscreen "$bin" --cli --first-run-script /dev/null 2>&1)
+    out=$(imager_ask "$bin" --cli --first-run-script /dev/null)
     if printf '%s' "$out" | grep -qi "unknown option.*first-run-script"; then echo too-old; return; fi
     if printf '%s' "$out" | grep -qiE 'error while loading shared|cannot open shared object|not found \(required by|version .GLIBC'; then
         echo broken; return
     fi
+    if [ "$OFFLINE" = 1 ] && ! imager_keeps_card "$bin"; then echo ejects; return; fi
     echo usable
 }
 
-# rpi-imager ejects the card when it finishes, which can take it away before
-# the install package is copied on. 2.0 and later take --disable-eject; older
-# builds reject it as an unknown option. Asked the same way as above, with no
-# device, so nothing is written. Sets RPI_IMAGER_ARGS.
+# Offline setup copies the offline files onto the card after the imager
+# finishes, so the imager is told to leave the card attached. Sets
+# RPI_IMAGER_ARGS.
 RPI_IMAGER_ARGS=()
 choose_imager_eject_args() {
-    local out
     RPI_IMAGER_ARGS=()
-    # Without a device the imager always exits nonzero. Only its words count.
-    out=$(QT_QPA_PLATFORM=offscreen "$RPI_IMAGER_CMD" --cli --disable-eject --first-run-script /dev/null 2>&1) || true
-    if printf '%s' "$out" | grep -qi "unknown option.*disable-eject"; then
-        echo "This rpi-imager ejects cards when it finishes. If a card is gone before the"
-        echo "offline files are copied on, the flasher stops and says so."
-        return 0
-    fi
-    RPI_IMAGER_ARGS=(--disable-eject)
+    if imager_keeps_card "$RPI_IMAGER_CMD"; then RPI_IMAGER_ARGS=(--disable-eject); fi
 }
 
 version_ge() { [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -1)" = "$2" ]; }
@@ -296,67 +324,99 @@ pkg_candidate_version() {
     esac
 }
 
-# Fetch the AppImage and unpack it once. Extracting costs about 110 MB here and
-# means every later flash starts immediately, with no FUSE and no root needed to
-# set it up.
-download_imager() {
-    local arch dest tmp
-    arch=$(uname -m)
-    if [ "$arch" != "x86_64" ]; then
-        echo "  Raspberry Pi publishes an AppImage for x86_64 only, and this is $arch."
-        echo "  Install rpi-imager $RPI_IMAGER_MIN_VERSION or newer from your distribution,"
+# One file from flasher-tools.json, as "name url sha256 version", for a tool
+# and platform such as "rpi-imager linux-x86_64". Prints nothing if there is
+# none.
+tool_pin() {
+    python3 -I - "$FLASHER_TOOLS_FILE" "$1" "$2" 2>/dev/null <<'PY'
+import json, sys
+for item in json.load(open(sys.argv[1]))["files"]:
+    if item["tool"] == sys.argv[2] and item["platform"] == sys.argv[3]:
+        print(item["name"], item["url"], item["sha256"], item["version"])
+        break
+PY
+}
+
+imager_platform() {
+    case "$(uname -m)" in
+        x86_64|amd64)  echo linux-x86_64 ;;
+        aarch64|arm64) echo linux-aarch64 ;;
+    esac
+}
+
+# Put the pinned AppImage in RPI_IMAGER_LOCAL_DIR: the copy in the offline kit,
+# or a download. Either way it must match flasher-tools.json. Unpacking costs
+# about 110 MB once and means every later flash starts immediately, with no
+# FUSE and no root needed to set it up.
+install_imager() {
+    local pin name url sha version dest tmp
+    pin=$(tool_pin rpi-imager "$(imager_platform)")
+    if [ -z "$pin" ]; then
+        echo "  Raspberry Pi publishes rpi-imager AppImages for x86_64 and aarch64 only, and this is $(uname -m)."
+        echo "  Install rpi-imager $(imager_need) or newer from your distribution,"
         echo "  or from Flathub: flatpak install flathub org.raspberrypi.rpi-imager"
         return 1
     fi
+    read -r name url sha version <<< "$pin"
 
-    dest="$PWD/$RPI_IMAGER_LOCAL_DIR"
+    dest="$RPI_IMAGER_LOCAL_DIR"
     rm -rf "$dest"
     mkdir -p "$dest" || { echo "  Could not create $dest"; return 1; }
 
     tmp="$dest/imager.AppImage"
-    echo "  Downloading rpi-imager from raspberrypi.org (about 33 MB)..."
-    if ! fetch_url "$RPI_IMAGER_APPIMAGE_URL" "$tmp"; then
-        echo "  Download failed. Check the network, or install rpi-imager yourself."
+    if [ -n "$KIT_DIR" ]; then
+        if ! cp "$KIT_DIR/tools/$name" "$tmp" 2>/dev/null; then
+            echo "  The offline kit has no tools/$name. Make the kit again."
+            rm -rf "$dest"; return 1
+        fi
+    else
+        echo "  Downloading rpi-imager $version from GitHub (about 35 MB)..."
+        if ! fetch_url "$url" "$tmp"; then
+            echo "  Download failed. Check the network, or install rpi-imager yourself."
+            rm -rf "$dest"; return 1
+        fi
+    fi
+    if ! printf '%s  %s\n' "$sha" "$tmp" | sha256sum -c --status - 2>/dev/null; then
+        echo "  $name does not match its checksum.$([ -z "$KIT_DIR" ] || echo ' Make the kit again.')"
         rm -rf "$dest"; return 1
     fi
     chmod +x "$tmp"
 
-    echo "  Unpacking it..."
+    echo "  Unpacking rpi-imager $version into $dest..."
     ( cd "$dest" && ./imager.AppImage --appimage-extract >/dev/null 2>&1 ) || {
-        echo "  Could not unpack the download."
+        echo "  Could not unpack it."
         rm -rf "$dest"; return 1
     }
     rm -f "$tmp"
 
-    # No checksum is published next to the AppImage, so the download is judged
-    # by whether it runs and takes the option we need.
     if [ "$(imager_state_of "$(local_imager_path)")" != usable ]; then
-        echo "  The downloaded copy does not work on this machine."
+        echo "  rpi-imager $version does not work on this computer."
         rm -rf "$dest"; return 1
     fi
-    echo "  rpi-imager $(imager_version_of "$(local_imager_path)") is ready in $dest"
+    echo "  rpi-imager $version is ready."
     return 0
 }
 
 # Decide which rpi-imager this run will use. Sets RPI_IMAGER_CMD.
 resolve_rpi_imager() {
-    local sys_bin sys_state="" sys_ver="" loc_bin loc_state="" loc_ver="" cand
+    local sys_bin sys_state="" sys_ver="" loc_bin loc_state="" loc_ver="" cand need
 
+    need=$(imager_need)
     sys_bin="$(command -v rpi-imager 2>/dev/null || true)"
     [ -n "$sys_bin" ] && { sys_state="$(imager_state_of "$sys_bin")"; sys_ver="$(imager_version_of "$sys_bin")"; }
 
     loc_bin="$(local_imager_path)"
     [ -x "$loc_bin" ] && { loc_state="$(imager_state_of "$loc_bin")"; loc_ver="$(imager_version_of "$loc_bin")"; }
 
-    # A copy in this folder that is newer than the system one is assumed to be
-    # here on purpose, so it wins.
+    # A copy this flasher unpacked that is newer than the system one is
+    # assumed to be there on purpose, so it wins.
     if [ "$loc_state" = usable ]; then
-        # Strictly newer. On a tie there is no reason to prefer our download
-        # over the copy the system maintains.
+        # Strictly newer. On a tie there is no reason to prefer our copy over
+        # the one the system maintains.
         if [ "$sys_state" != usable ] || \
            { [ "${loc_ver:-0}" != "${sys_ver:-0}" ] && version_ge "${loc_ver:-0}" "${sys_ver:-0}"; }; then
             RPI_IMAGER_CMD="$loc_bin"
-            echo "Using rpi-imager ${loc_ver:-unknown} from this folder."
+            echo "Using rpi-imager ${loc_ver:-unknown} from $RPI_IMAGER_LOCAL_DIR."
             return 0
         fi
     fi
@@ -369,15 +429,33 @@ resolve_rpi_imager() {
 
     case "$sys_state" in
         too-old) echo "rpi-imager $sys_ver is installed but does not support --first-run-script." ;;
+        ejects)  echo "rpi-imager ${sys_ver:-unknown} is installed, but it ejects the card when it finishes."
+                 echo "Offline setup copies files onto the card after that, so it needs"
+                 echo "rpi-imager $RPI_IMAGER_OFFLINE_MIN_VERSION or newer." ;;
         broken)  echo "rpi-imager is installed but will not run on this machine." ;;
         *)       echo "rpi-imager is not installed." ;;
     esac
-    echo "Without it a card gets written and then fails at the last step, leaving a"
-    echo "node that boots stock Raspberry Pi OS and never sets itself up."
+    if [ "$sys_state" != ejects ]; then
+        echo "Without it a card gets written and then fails at the last step, leaving a"
+        echo "node that boots stock Raspberry Pi OS and never sets itself up."
+    fi
     echo
 
+    # The kit carries its own copy, and unpacking it changes nothing else on
+    # this computer, so there is nothing to ask.
+    if [ -n "$KIT_DIR" ]; then
+        echo "Using the rpi-imager that came with the offline kit."
+        if ! install_imager; then
+            echo
+            echo "Install rpi-imager $need or newer on this computer, then run this again."
+            return 1
+        fi
+        RPI_IMAGER_CMD="$(local_imager_path)"
+        return 0
+    fi
+
     cand="$(pkg_candidate_version rpi-imager)"
-    if [ -n "$cand" ] && version_ge "$cand" "$RPI_IMAGER_MIN_VERSION"; then
+    if [ -n "$cand" ] && version_ge "$cand" "$need"; then
         echo "$PKG_MGR offers $cand, which is new enough:"
         echo
         echo "  $PKG_INSTALL rpi-imager"
@@ -390,23 +468,18 @@ resolve_rpi_imager() {
         echo "${PKG_MGR:-This system} has no rpi-imager package to fall back on."
     fi
 
-    if [ -n "$KIT_DIR" ]; then
-        echo "Running from an offline kit, so nothing can be downloaded here. Install"
-        echo "rpi-imager $RPI_IMAGER_MIN_VERSION or newer on this computer, then run this again."
-        return 1
-    fi
     if [ ! -t 0 ]; then
         echo "Not running interactively, so nothing will be downloaded here."
         return 1
     fi
-    echo "Download rpi-imager into this folder instead? Nothing outside it is touched. [Y/n]: "
+    echo "Download rpi-imager into $RPI_IMAGER_LOCAL_DIR instead? Nothing outside it is touched. [Y/n]: "
     read -r ans
     if [[ "$ans" =~ ^[Nn] ]]; then
-        echo "Install rpi-imager $RPI_IMAGER_MIN_VERSION or newer yourself, then run this again."
+        echo "Install rpi-imager $need or newer yourself, then run this again."
         return 1
     fi
     echo
-    download_imager || return 1
+    install_imager || return 1
     RPI_IMAGER_CMD="$(local_imager_path)"
     return 0
 }

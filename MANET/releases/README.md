@@ -44,8 +44,11 @@ both embedded version files. It checks that the offline bundle carries the
 committed version, was built for the Raspberry Pi OS image the committed
 flashers write, and holds the yq and MediaMTX the templates pin. That image's
 URL, size, and digest go into the manifest as `os_image`, which offline kits
-use. It packages the committed provisioning scripts in
-`manet-flasher.zip`, adds standalone Linux and Windows launchers, and creates a
+use. It checks `MANET/provisioning/flasher-tools.json`, the Raspberry Pi
+Imager and rpiboot files an offline kit carries, which must name exactly those
+programs as pinned GitHub release files. It packages the committed provisioning
+scripts and that file in `manet-flasher.zip`, adds standalone Linux and
+Windows launchers, and creates a
 manifest with the source commit, version, file sizes, and SHA-256 digests. It
 uploads everything to a draft, checks GitHub's stored sizes and digests, and
 publishes only when the complete set matches. An interrupted upload leaves a

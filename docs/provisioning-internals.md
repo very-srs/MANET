@@ -151,13 +151,25 @@ Raspberry Pi download. Older releases have neither and still validate.
 
 `--make-kit DIR` (both launchers) selects the stable or development manifest and
 fills `DIR` with `manet-flasher.zip`, both launchers, `cm4-install.tar.gz`,
-`cm4-offline.tar`, the image named by `os_image`, and the manifest. Every file
+`cm4-offline.tar`, the image named by `os_image`, the manifest, and a `tools`
+folder. Every file
 is checked against its size and digest, a download goes to `.partial` first,
 and a verified file already present is kept, so a second run resumes. The
 marker `MANET-OFFLINE-KIT.txt` is removed at the start and written last, so a
 half-filled folder is not taken for a kit. The Windows launcher makes kits
 before its UAC relaunch, since a folder needs no administrator access. Both
 write the same kit, so either computer can use it.
+
+`tools` holds the programs the flashing computer may lack, pinned by name, URL,
+size and SHA-256 in `MANET/provisioning/flasher-tools.json`: the Raspberry Pi
+Imager AppImages for x86_64 and aarch64, its Windows installer, and the
+Windows rpiboot installer, all GitHub release files from Raspberry Pi. The
+launchers read the pins from the flasher ZIP after checking it, accept only
+`github.com/raspberrypi/rpi-imager` and `usbboot` release URLs whose last part
+is the file name, and refuse a release whose ZIP has no pins. `publish.py`
+requires exactly those four programs and ships the file in the ZIP, so each
+engine checks the kit's copies against the pins beside it. There is no Linux
+rpiboot, since it would need a build for each distribution.
 
 A launcher that finds the marker in its own folder, or the folder above (its
 `manet-flasher` or `MANET Flasher` working copy), runs from the kit. It reads
@@ -167,7 +179,12 @@ in that path calls curl or `Invoke-WebRequest`. `--development` and
 `--local-scripts` are refused, since a kit is fixed to one release. A missing
 host tool stops the run with a list of what to install. The Linux preflight
 does not offer its package-manager install, and the Windows prerequisites page
-does not download installers. The window refuses Rock 3A, which would need the
+does not download installers. The exceptions are the programs in `tools`. The
+Linux engine unpacks the kit's imager when it needs one (see
+[Finding a usable rpi-imager](#finding-a-usable-rpi-imager)). On Windows the
+prerequisites page installs from a checked temporary copy of the kit's file,
+and the console flow offers the kit's installer before its file picker, from
+`Find-ProgramPath -KitTool`. The window refuses Rock 3A, which would need the
 Armbian image and a network.
 
 ### Flasher side
@@ -193,11 +210,15 @@ The copy happens after rpi-imager exits:
 1. The imager's eject would take the card away first, so the engines pass
    `--disable-eject` when the imager accepts it. Linux asks the binary the
    same way `imager_state_of` does, with no device, and treats an
-   `Unknown option` reply as unsupported. Windows decides from the file
+   `Unknown option` reply as unsupported. For an offline run that answer
+   makes `imager_state_of` report `ejects`, so `resolve_rpi_imager` moves on
+   to its own copy before any card is written. Windows decides from the file
    version without running the program. It passes the flag only to a build
-   whose file version is 2 or later, or to `rpi-imager-cli.cmd`, which only
+   whose file version is 1.9 or later, or to `rpi-imager-cli.cmd`, which only
    2.x ships, and refuses offline setup with any other imager. Passing the
-   flag to 1.x would fail the whole run.
+   flag to an older build would fail the whole run. The option first appears
+   in rpi-imager 1.9.0. 1.8.5 ejects through udisks2 on Linux after every
+   write.
 2. Linux rereads the partition table, takes the card's first partition, and
    requires `blkid` to report `vfat`. Windows takes the lowest-numbered
    partition, adds a drive letter if it has none, and requires a FAT volume.
@@ -428,6 +449,7 @@ outcomes rather than two:
 |---|---|
 | usable | takes the option |
 | too-old | `Unknown option 'first-run-script'` |
+| ejects | offline runs only: `Unknown option 'disable-eject'` |
 | broken | dies in the dynamic loader before parsing anything |
 
 The third case is why a version comparison alone is not enough. Ubuntu 24.04's
@@ -438,24 +460,31 @@ it long before anything could be opened.
 
 `resolve_rpi_imager` takes the first match:
 
-1. a copy in the working folder, when it is *strictly* newer than the system
+1. a copy this flasher unpacked, when it is *strictly* newer than the system
    one, on the assumption it was put there deliberately
-2. the system `rpi-imager`, when the probe says it works
-3. the package manager, when its candidate is 1.8.0 or later
-4. the AppImage from raspberrypi.org, unpacked once into the working folder
+2. the system `rpi-imager`, when the probe says it works for this run
+3. the package manager, when its candidate is 1.8.0 or later (1.9.0 for an
+   offline run)
+4. the AppImage pinned in `flasher-tools.json`, unpacked once: from the kit's
+   `tools` folder without asking on a kit run, otherwise downloaded after a
+   `[Y/n]`
 
 Nothing replaces a working system install. That rule exists because doing it
 once, from a non-interactive test where an empty answer took the `[Y/n]`
 default, removed a working 1.9.6 from a machine and left 1.7.2 in its place.
 
 The AppImage is unpacked with `--appimage-extract` rather than run directly.
-That costs about 110 MB in the folder and avoids FUSE entirely, so no root is
-needed to set it up and no re-extraction happens per flash. Raspberry Pi
-publishes it for x86_64 only, with no arm64 `.deb` or AppImage, so an arm64
-host falls back to its distribution's package or to Flathub, which does build
-`org.raspberrypi.rpi-imager` for aarch64.
+That costs about 110 MB and avoids FUSE entirely, so no root is needed to set
+it up and no re-extraction happens per flash. The copy goes in the working
+folder, or in `~/.cache/manet-flasher/imager` on a kit run, because the
+unpacked tree holds symbolic links that a FAT32 stick cannot store. Raspberry
+Pi publishes AppImages for x86_64 and aarch64. Any other host falls back to
+its distribution's package or to Flathub.
 
-No checksum is published next to the AppImage, so the download is judged by
-whether it runs and accepts the option. Two version banner formats exist and
+GitHub publishes a SHA-256 for every release file, which `flasher-tools.json`
+pins, and the copy must match it before it is unpacked. The unpacked imager is
+then probed like any other. Probes run with a throwaway `XDG_DATA_HOME`,
+because 2.x registers an `rpi-imager://` URL handler naming whichever copy
+answered. Two version banner formats exist and
 both print on stderr: `rpi-imager version 1.7.2` on 1.x, and
 `Raspberry Pi Imager v2.0.11.1` on 2.x.

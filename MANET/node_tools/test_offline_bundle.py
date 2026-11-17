@@ -125,6 +125,32 @@ class OfflineBundleReleaseTests(unittest.TestCase):
             PUBLISH.check_offline_bundle(path, self.version)
 
 
+class FlasherToolTests(unittest.TestCase):
+    def test_committed_pins_cover_every_kit_program(self):
+        PUBLISH.check_flasher_tools((PROVISIONING / 'flasher-tools.json').read_text())
+
+    def test_bad_pins_are_refused(self):
+        pins = json.loads((PROVISIONING / 'flasher-tools.json').read_text())
+        cases = {
+            'other host': dict(url='https://example.com/download/v1/' + pins['files'][0]['name']),
+            'name mismatch': dict(name='other.AppImage'),
+            'digest': dict(sha256='x' * 64),
+            'size': dict(size=0),
+        }
+        for label, change in cases.items():
+            with self.subTest(label):
+                broken = json.loads(json.dumps(pins))
+                broken['files'][0].update(change)
+                with self.assertRaisesRegex(ValueError, 'Invalid program'):
+                    PUBLISH.check_flasher_tools(json.dumps(broken))
+        missing = dict(pins, files=pins['files'][1:])
+        with self.assertRaisesRegex(ValueError, 'exactly the programs'):
+            PUBLISH.check_flasher_tools(json.dumps(missing))
+
+    def test_flasher_zip_carries_the_pins(self):
+        self.assertIn('flasher-tools.json', PUBLISH.PROVISIONING)
+
+
 class OfflineManifestTests(unittest.TestCase):
     image = {'url': IMAGE, 'sha256': 'c' * 64, 'size': 5}
 

@@ -94,6 +94,9 @@ $DEVICE_WAIT   = 8   # seconds to wait for the CM4 eMMC to enumerate after rpibo
 # See Get-OfflineFiles. Without the option nothing touches them and first boot
 # downloads as before.
 $OFFLINE_FILE_DIR = Join-Path $WorkDir "packages"
+# Programs an offline kit carries for this computer (Raspberry Pi Imager and
+# rpiboot), pinned by name and SHA-256. See Get-KitToolPath.
+$FLASHER_TOOLS_FILE = Join-Path $ScriptDir "flasher-tools.json"
 
 # Where a program location the user pointed us at gets remembered, so nobody is
 # asked twice. Not a *.conf, so the saved-config picker does not list it.
@@ -581,7 +584,9 @@ function Find-ProgramPath {
         [string]  $NamePattern   = '*',
         [string]  $Filter        = 'Programs (*.exe;*.cmd;*.bat)|*.exe;*.cmd;*.bat|All files (*.*)|*.*',
         [string]  $DownloadUrl   = '',
-        [string]  $UsualLocation = ''
+        [string]  $UsualLocation = '',
+        # A program the offline kit carries an installer for.
+        [string]  $KitTool       = ''
     )
 
     # 1. Where the user pointed us last time.
@@ -612,7 +617,15 @@ function Find-ProgramPath {
         }
     }
 
-    # 4. Ask.
+    # 4. The offline kit's installer, when this is a kit run. A computer without
+    # internet has nowhere else to get it from.
+    if ($KitTool -and (Install-KitTool -Tool $KitTool -DisplayName $DisplayName)) {
+        $again = @{} + $PSBoundParameters
+        $again.Remove('KitTool')
+        return (Find-ProgramPath @again)
+    }
+
+    # 5. Ask.
     while ($true) {
         $answer = Show-ProgramNotFoundWindow -DisplayName $DisplayName `
                                              -UsualLocation $UsualLocation `
@@ -682,7 +695,8 @@ function Invoke-RpiBoot {
         -NamePattern   'rpiboot*' `
         -Filter        'rpiboot (rpiboot.exe)|rpiboot.exe|Programs (*.exe)|*.exe|All files (*.*)|*.*' `
         -DownloadUrl   'https://github.com/raspberrypi/usbboot/releases' `
-        -UsualLocation 'C:\Program Files (x86)\Raspberry Pi\rpiboot.exe'
+        -UsualLocation 'C:\Program Files (x86)\Raspberry Pi\rpiboot.exe' `
+        -KitTool       'rpiboot'
 
     if (-not $Script:RPIBOOT_PATH) {
         # Not found and not supplied - fall back to the old manual flow rather
@@ -1008,6 +1022,58 @@ function Select-TargetDiskConsole {
     }
 }
 
+function Find-RpiImager {
+    Find-ProgramPath `
+        -Key           'rpi-imager' `
+        -DisplayName   'Raspberry Pi Imager' `
+        -CommandNames  @('rpi-imager-cli.cmd', 'rpi-imager.exe', 'rpi-imager') `
+        -RelativePaths @(
+            'Raspberry Pi Ltd\Imager\rpi-imager-cli.cmd',
+            'Raspberry Pi Ltd\Imager\rpi-imager.exe',
+            'Raspberry Pi Imager\rpi-imager.exe',
+            'Raspberry Pi\Imager\rpi-imager.exe'
+        ) `
+        -NamePattern   'rpi-imager*' `
+        -Filter        'Raspberry Pi Imager|rpi-imager*.exe;rpi-imager*.cmd|Programs (*.exe;*.cmd)|*.exe;*.cmd|All files (*.*)|*.*' `
+        -DownloadUrl   'https://www.raspberrypi.com/software/' `
+        -UsualLocation 'C:\Program Files\Raspberry Pi Ltd\Imager\' `
+        -KitTool       'rpi-imager'
+}
+
+# The verified copy of a program in the offline kit's tools folder, as Path,
+# Name and Version, or nothing. Only a kit run has one.
+function Get-KitToolPath {
+    param([string]$Tool)
+    if (-not $env:MANET_KIT_DIR -or -not (Test-Path -LiteralPath $FLASHER_TOOLS_FILE)) { return $null }
+    $pin = @((Get-Content -LiteralPath $FLASHER_TOOLS_FILE -Raw | ConvertFrom-Json).files |
+             Where-Object { $_.tool -eq $Tool -and $_.platform -eq 'windows' }) | Select-Object -First 1
+    if (-not $pin) { return $null }
+    $path = Join-Path (Join-Path $env:MANET_KIT_DIR 'tools') $pin.name
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        Write-Host "The offline kit has no tools\$($pin.name). Make the kit again." -ForegroundColor Yellow
+        return $null
+    }
+    if ((Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant() -ne $pin.sha256) {
+        Write-Host "tools\$($pin.name) in the offline kit is damaged. Make the kit again." -ForegroundColor Yellow
+        return $null
+    }
+    return [pscustomobject]@{ Path = $path; Name = $pin.name; Version = $pin.version }
+}
+
+# Offer to run the installer the offline kit carries. True once it has run.
+function Install-KitTool {
+    param([string]$Tool, [string]$DisplayName)
+    $kitTool = Get-KitToolPath -Tool $Tool
+    if (-not $kitTool) { return $false }
+    Write-Host ""
+    Write-Host "The offline kit carries $DisplayName $($kitTool.Version): tools\$($kitTool.Name)"
+    $answer = Read-Host "Install it now? [Y/n]"
+    if ($answer -match '^[Nn]') { return $false }
+    Write-Host "Running the installer. Click through it, then come back here."
+    Start-Process -FilePath $kitTool.Path -Wait
+    return $true
+}
+
 function Select-HardwareAndTargetDevice {
     Write-Host ""
     Write-Host "--- 1. Select Hardware ---"
@@ -1028,20 +1094,19 @@ function Select-HardwareAndTargetDevice {
     } while ($choice -notmatch "^[1234]$")
 
     if ($Script:HARDWARE_MODEL -ne "r3a") {
-        $Script:RPI_IMAGER_PATH = Find-ProgramPath `
-            -Key           'rpi-imager' `
-            -DisplayName   'Raspberry Pi Imager' `
-            -CommandNames  @('rpi-imager-cli.cmd', 'rpi-imager.exe', 'rpi-imager') `
-            -RelativePaths @(
-                'Raspberry Pi Ltd\Imager\rpi-imager-cli.cmd',
-                'Raspberry Pi Ltd\Imager\rpi-imager.exe',
-                'Raspberry Pi Imager\rpi-imager.exe',
-                'Raspberry Pi\Imager\rpi-imager.exe'
-            ) `
-            -NamePattern   'rpi-imager*' `
-            -Filter        'Raspberry Pi Imager|rpi-imager*.exe;rpi-imager*.cmd|Programs (*.exe;*.cmd)|*.exe;*.cmd|All files (*.*)|*.*' `
-            -DownloadUrl   'https://www.raspberrypi.com/software/' `
-            -UsualLocation 'C:\Program Files\Raspberry Pi Ltd\Imager\'
+        $Script:RPI_IMAGER_PATH = Find-RpiImager
+        # Offline setup copies files onto the card after the imager writes it,
+        # so an imager that ejects the card cannot do it. A kit carries one
+        # that can.
+        if ($Script:RPI_IMAGER_PATH -and $Script:OFFLINE -and
+                @(Get-RpiImagerExtraArgs $Script:RPI_IMAGER_PATH).Count -eq 0) {
+            Write-Host ""
+            Write-Host "This Raspberry Pi Imager ejects the card when it finishes. Offline setup" -ForegroundColor Yellow
+            Write-Host "copies files onto the card after that, so it needs version 1.9 or later." -ForegroundColor Yellow
+            if (Install-KitTool -Tool 'rpi-imager' -DisplayName 'Raspberry Pi Imager') {
+                $Script:RPI_IMAGER_PATH = Find-RpiImager
+            }
+        }
 
         if (-not $Script:RPI_IMAGER_PATH) {
             Write-Host ""
@@ -2294,17 +2359,19 @@ function Get-OfflineFiles {
 # only works with an imager that can leave the card attached.
 function Assert-ImagerKeepsCard {
     if (@(Get-RpiImagerExtraArgs $Script:RPI_IMAGER_PATH).Count -eq 0) {
-        throw ('Offline setup needs Raspberry Pi Imager 2.0 or later. This one ejects the card ' +
-               'before the offline files can be copied onto it.')
+        $source = if ($env:MANET_KIT_DIR) { 'Install the one in the offline kit''s tools folder' }
+                  else { 'Install the current one from https://www.raspberrypi.com/software/' }
+        throw ('Offline setup needs Raspberry Pi Imager 1.9 or later. This one ejects the card ' +
+               "before the offline files can be copied onto it. $source, then run this again.")
     }
 }
 
 # rpi-imager ejects the card when it finishes, which on Windows takes it off
-# the bus before the install package can be copied on. 2.0 and later take
+# the bus before the install package can be copied on. 1.9 and later take
 # --disable-eject. Older builds refuse the whole run over an unknown option,
-# so the flag goes only to a build known to be 2.0 or later. Only 2.x ships
-# rpi-imager-cli.cmd, so a .cmd counts as 2.x unless the program beside it
-# says otherwise.
+# so the flag goes only to a build known to be 1.9 or later. Only 2.x ships
+# rpi-imager-cli.cmd, so a .cmd counts as new enough unless the program beside
+# it says otherwise.
 function Get-RpiImagerExtraArgs {
     param([string]$ImagerPath)
     if (-not $ImagerPath) { return @() }
@@ -2313,9 +2380,12 @@ function Get-RpiImagerExtraArgs {
         $exe = Join-Path (Split-Path -Parent $ImagerPath) 'rpi-imager.exe'
         if (-not (Test-Path -LiteralPath $exe)) { return @('--disable-eject') }
     }
-    $major = 0
-    try { $major = (Get-Item -LiteralPath $exe).VersionInfo.FileMajorPart } catch { }
-    if ($major -ge 2) { return @('--disable-eject') }
+    $version = [version]'0.0'
+    try {
+        $info = (Get-Item -LiteralPath $exe).VersionInfo
+        $version = New-Object Version($info.FileMajorPart, $info.FileMinorPart)
+    } catch { }
+    if ($version -ge [version]'1.9') { return @('--disable-eject') }
     return @()
 }
 

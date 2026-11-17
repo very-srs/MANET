@@ -232,17 +232,25 @@ First fill a USB stick on any computer that has internet, Linux or Windows:
 ```
 
 The kit folder holds both launchers, the setup scripts, the Raspberry Pi OS
-image, the install package, and the offline bundle for one release, about
-830 MB in all. Add `--development` to make a kit from the newest published
+image, the install package, and the offline bundle for one release. Its
+`tools` folder holds Raspberry Pi Imager for Linux and Windows, and rpiboot
+for Windows. That comes to about 860 MB in all. Add `--development` to make a kit from the newest published
 build. Running `--make-kit` again on the same folder checks what is already
 there and downloads only what is missing or damaged.
 
 On the computer without internet, run the launcher from the kit folder:
 `bash flash-a-radio.sh` on Linux, or double-click `Flash-a-Radio.cmd` on
 Windows. It finds `MANET-OFFLINE-KIT.txt` beside it, uses only the files in the
-kit, and writes offline cards. That computer needs Raspberry Pi Imager, and
-`rpiboot` for a CM4, installed beforehand. Saved settings are kept in a folder
-inside the kit.
+kit, and writes offline cards. Saved settings are kept in a folder inside the
+kit.
+
+Offline setup needs Raspberry Pi Imager 1.9 or later on that computer, and
+`rpiboot` for a CM4. When the Linux flasher finds no imager that new, it
+unpacks the kit's copy into `~/.cache/manet-flasher/imager` and uses it from
+there, without installing anything. On Windows the flasher offers to run the
+kit's installers for Raspberry Pi Imager and rpiboot. On Linux, install
+`rpiboot` before the computer goes offline. Debian and Ubuntu package it as
+`rpiboot`.
 
 #### What goes on the card
 
@@ -253,10 +261,13 @@ flasher downloads them once from the selected release and keeps them in a
 before it is used.
 
 The flasher copies them after Raspberry Pi Imager has written the card, so the
-imager must leave the card attached. Raspberry Pi Imager 2.0 and later can do
-that. Windows needs version 2.0 or later for offline setup. On Linux an older
-imager may still work. If a card cannot take the files, the flasher stops and
-says that the card is not ready for offline setup. Flash it again.
+imager must leave the card attached. Version 1.9 and later can do that. Older
+versions always eject the card. Before writing any card, the flasher checks the
+imager and will not do offline setup with one that ejects. The Linux flasher
+then offers to download its own copy, or takes the kit's. The Windows window
+shows **Update it** beside Raspberry Pi Imager on the prerequisites page. If a
+card still cannot take the files, the flasher stops and says that the card is
+not ready for offline setup. Flash it again.
 
 First boot checks both files against the checksums written into the card's
 setup script. When both match, it does not wait for internet, and every package
@@ -314,16 +325,21 @@ additional setup scripts stay in this folder; each run fetches and verifies the
 selected release's flasher bundle. Python 3, curl, and internet access are needed.
 A run from an [offline kit](#offline-setup) needs only Python 3.
 
-`rpi-imager` has to be version 1.8 or newer. Older builds cannot put the mesh
+`rpi-imager` has to be version 1.8 or newer, and 1.9 or newer for offline
+setup. Older builds cannot put the mesh
 setup script onto the card, and they fail only after the card has been written,
 leaving something that boots stock Raspberry Pi OS and never sets itself up.
 Ubuntu 22.04 ships 1.7.2, which is too old. The script tests the one on this
 machine instead of trusting its version number, since a package built for a
 newer distribution can be new enough and still not run at all. If it is usable
-you keep it. If your package manager offers 1.8 or later you are told the
-command. Otherwise the script downloads its own copy into the `manet-flasher`
-folder and uses it from there, which costs about 110 MB and needs no root. It
-never replaces an rpi-imager that works.
+you keep it. If your package manager offers a new enough version you are told
+the command. Otherwise the script downloads Raspberry Pi Imager 2.0.12 from
+Raspberry Pi's GitHub releases, checks it against the SHA-256 in
+`flasher-tools.json`, and unpacks it into the `manet-flasher` folder. That
+costs about 110 MB and needs no root. A run from an offline kit unpacks the
+kit's copy into `~/.cache/manet-flasher/imager` instead, because a FAT32 USB
+stick cannot hold the unpacked files. It never replaces an rpi-imager that
+works.
 
 Next it checks this computer for the tools it uses, naming what each one is
 for. On Debian and Ubuntu it offers to install the missing ones with apt, and

@@ -203,7 +203,7 @@ function powershell.exe {
 
     def run_bash(self, script, cwd, **env):
         return subprocess.run(['bash', '-c', script], cwd=cwd, text=True, capture_output=True,
-                              env=dict(self.environment, **env), timeout=30)
+                              stdin=subprocess.DEVNULL, env=dict(self.environment, **env), timeout=30)
 
     def command(self, name, source):
         path = self.bin / name
@@ -226,11 +226,29 @@ function powershell.exe {
             self.mapping[DOWNLOADS + f'/v0.551/{name}'] = str(source / name)
         image = source / 'test-lite.img.xz'
         image.write_bytes(b'raspberry pi os image\n' * 16)
+        tools = self.kit_tools(source)
+        with zipfile.ZipFile(self.bundle, 'a') as archive:
+            archive.writestr('flasher-tools.json', json.dumps({'files': tools}))
+        self.manifest['assets']['manet-flasher.zip'] = {
+            'size': self.bundle.stat().st_size, 'sha256': hashlib.sha256(self.bundle.read_bytes()).hexdigest()}
         if offline:
             self.manifest['os_image'] = {'url': image_url, 'size': image.stat().st_size,
                                          'sha256': hashlib.sha256(image.read_bytes()).hexdigest()}
         self.mapping[image_url] = str(image)
         return files, image
+
+    def kit_tools(self, source):
+        """Pins for two programs, as flasher-tools.json lists them."""
+        tools = []
+        for tool, platform, name in (('rpi-imager', 'linux-x86_64', 'imager-test.AppImage'),
+                                     ('rpi-imager', 'windows', 'imager-test.exe')):
+            path = source / name
+            path.write_bytes(name.encode() * 8)
+            url = f'https://github.com/raspberrypi/rpi-imager/releases/download/v9.9/{name}'
+            self.mapping[url] = str(path)
+            tools.append({'tool': tool, 'version': '9.9', 'platform': platform, 'name': name, 'url': url,
+                          'size': path.stat().st_size, 'sha256': hashlib.sha256(path.read_bytes()).hexdigest()})
+        return tools
 
     def test_linux_offline_is_opt_in(self):
         for args, value in (((), '0'), (('--offline',), '1')):
@@ -248,9 +266,12 @@ function powershell.exe {
         for name, data in files.items():
             self.assertEqual((kit / name).read_bytes(), data)
         self.assertEqual((kit / 'test-lite.img.xz').read_bytes(), image.read_bytes())
+        for name in ('imager-test.AppImage', 'imager-test.exe'):
+            self.assertEqual((kit / 'tools' / name).read_bytes(), name.encode() * 8)
         self.assertEqual(json.loads((kit / 'manet-release.json').read_text())['tag'], 'v0.551')
         self.assertIn('release 0.551', (kit / 'MANET-OFFLINE-KIT.txt').read_text())
-        self.assertFalse(list(kit.glob('*.partial')))
+        self.assertIn('1.9 or later', (kit / 'MANET-OFFLINE-KIT.txt').read_text())
+        self.assertFalse(list(kit.glob('**/*.partial')))
         # A second run checks what is there and downloads only the manifest.
         self.events.write_text('')
         result = self.run_linux('--make-kit', str(kit))
@@ -280,6 +301,27 @@ function powershell.exe {
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('has no offline bundle', result.stderr)
         self.assertFalse((kit / 'MANET-OFFLINE-KIT.txt').exists())
+
+    def test_linux_kit_needs_pinned_programs(self):
+        self.kit_release()
+        source = self.work / 'release-files'
+        bad = self.kit_tools(source)
+        bad[0]['url'] = 'https://example.com/imager-test.AppImage'
+        for pins, message in ((None, 'does not name the programs'), (bad, 'Invalid program')):
+            with self.subTest(message=message):
+                with zipfile.ZipFile(self.bundle, 'w') as archive:
+                    archive.writestr('linux-flasher.sh', '#!/bin/bash\n')
+                    if pins:
+                        archive.writestr('flasher-tools.json', json.dumps({'files': pins}))
+                self.manifest['assets']['manet-flasher.zip'] = {
+                    'size': self.bundle.stat().st_size,
+                    'sha256': hashlib.sha256(self.bundle.read_bytes()).hexdigest()}
+                kit = self.work / ('kit-' + message.split()[0])
+                result = self.run_linux('--make-kit', str(kit))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
+                self.assertFalse((kit / 'MANET-OFFLINE-KIT.txt').exists())
+                self.assertNotIn('example.com', self.events.read_text())
 
     def test_linux_release_files_are_verified_cached_and_taken_from_a_kit(self):
         package = self.work / 'cm4-offline.tar'
@@ -388,7 +430,8 @@ function powershell.exe {
     def test_linux_imager_eject_flag_follows_imager_support(self):
         imager = self.work / 'rpi-imager'
         # linux-flasher.sh runs under set -e, and the probe always exits nonzero.
-        script = ('set -e\n' + self.linux_functions('choose_imager_eject_args') +
+        script = ('set -e\n' + self.linux_functions('choose_imager_eject_args', 'imager_ask',
+                                                     'imager_keeps_card') +
                   f'\nRPI_IMAGER_CMD={imager}\nchoose_imager_eject_args\n'
                   'echo "ARGS=${RPI_IMAGER_ARGS[*]}"\n')
         for reply, args in (("Unknown option 'disable-eject'.", ''), ('Usage: rpi-imager', '--disable-eject')):
@@ -398,6 +441,78 @@ function powershell.exe {
                 result = self.run_bash(script, self.host)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn(f'ARGS={args}\n', result.stdout)
+
+    def fake_imager(self, path, version, keeps_card):
+        """An rpi-imager that answers version and option probes like the real one."""
+        reject = '' if keeps_card else (
+            'case " $* " in *" --disable-eject "*) echo "Unknown option \'disable-eject\'." >&2; exit 1;; esac\n')
+        path.write_text('#!/bin/bash\n'
+                        f'[ "$1" = --version ] && {{ echo "rpi-imager version {version}" >&2; exit 0; }}\n'
+                        + reject + 'echo "Usage: rpi-imager" >&2\nexit 1\n')
+        path.chmod(0o755)
+
+    def test_linux_offline_needs_an_imager_that_keeps_the_card(self):
+        """Offline setup refuses an imager that ejects the card. A kit run
+        unpacks the kit's checked imager into the local cache, using no
+        network. A normal flash keeps the system imager."""
+        system = self.bin / 'rpi-imager'
+        self.fake_imager(system, '1.8.5', keeps_card=False)
+        # The kit's AppImage unpacks to an imager that keeps the card.
+        appimage = self.work / 'imager-test.AppImage'
+        inner = self.work / 'inner-imager'
+        self.fake_imager(inner, '2.0.12', keeps_card=True)
+        appimage.write_text('#!/bin/bash\n[ "$1" = --appimage-extract ] || exit 1\n'
+                            f'mkdir -p squashfs-root && cp {inner} squashfs-root/AppRun\n')
+        kit = self.work / 'kit'
+        (kit / 'tools').mkdir(parents=True)
+        shutil.copyfile(appimage, kit / 'tools' / appimage.name)
+        pins = self.work / 'flasher-tools.json'
+        sha = hashlib.sha256(appimage.read_bytes()).hexdigest()
+        pins.write_text(json.dumps({'files': [
+            {'tool': 'rpi-imager', 'version': '2.0.12', 'platform': platform, 'name': appimage.name,
+             'url': f'https://github.com/raspberrypi/rpi-imager/releases/download/v2.0.12/{appimage.name}',
+             'size': appimage.stat().st_size, 'sha256': sha}
+            for platform in ('linux-x86_64', 'linux-aarch64')]}))
+        names = ('resolve_rpi_imager', 'install_imager', 'tool_pin', 'imager_platform', 'imager_need',
+                 'imager_ask', 'imager_version_of', 'imager_keeps_card', 'imager_state_of',
+                 'pkg_candidate_version', 'choose_imager_eject_args')
+        one_liners = ''.join(line + '\n' for line in (PROVISIONING / 'linux-flasher.sh').read_text().splitlines()
+                             if line.startswith(('local_imager_path() {', 'version_ge() {')))
+        script = ('set -e\n' + self.linux_functions(*names) + one_liners +
+                  '\nfetch_url() { echo NETWORK >> "$TEST_EVENTS"; return 1; }\n'
+                  'RPI_IMAGER_MIN_VERSION=1.8.0\nRPI_IMAGER_OFFLINE_MIN_VERSION=1.9.0\n'
+                  'resolve_rpi_imager || { echo STOPPED; exit 0; }\n'
+                  '[ "$OFFLINE" != 1 ] || choose_imager_eject_args\n'
+                  'echo "CMD=$RPI_IMAGER_CMD ARGS=${RPI_IMAGER_ARGS[*]}"\n')
+        cache = self.work / 'cache' / 'imager'
+        cases = (
+            ('normal flash keeps the system imager', dict(OFFLINE='0'), f'CMD={system} ARGS=\n', False),
+            ('kit unpacks its own imager', dict(OFFLINE='1', KIT_DIR=str(kit)),
+             f'CMD={cache}/squashfs-root/AppRun ARGS=--disable-eject\n', True),
+            ('unpacked copy is reused', dict(OFFLINE='1', KIT_DIR=str(kit)),
+             f'CMD={cache}/squashfs-root/AppRun ARGS=--disable-eject\n', False),
+            ('connected run without a terminal stops', dict(OFFLINE='1', KIT_DIR=''), 'STOPPED', True),
+        )
+        for label, env, expected, explained in cases:
+            with self.subTest(label):
+                self.events.write_text('')
+                result = self.run_bash(script, self.host, FLASHER_TOOLS_FILE=str(pins),
+                                       RPI_IMAGER_LOCAL_DIR=str(cache if env.get('KIT_DIR') else self.host / 'imager'),
+                                       **env)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(expected, result.stdout)
+                self.assertEqual(self.events.read_text(), '')
+                self.assertEqual('ejects the card' in result.stdout, explained, result.stdout)
+        # A damaged kit copy is refused and nothing is left unpacked.
+        shutil.rmtree(cache)
+        (kit / 'tools' / appimage.name).write_text('damaged')
+        result = self.run_bash(script, self.host, FLASHER_TOOLS_FILE=str(pins), RPI_IMAGER_LOCAL_DIR=str(cache),
+                               OFFLINE='1', KIT_DIR=str(kit))
+        self.assertIn('STOPPED', result.stdout)
+        self.assertIn('does not match its checksum. Make the kit again', result.stdout)
+        self.assertIn('Install rpi-imager 1.9.0 or newer', result.stdout)
+        self.assertFalse(cache.exists())
+        self.assertEqual(self.events.read_text(), '')
 
     def test_linux_flash_without_option_is_unchanged(self):
         """Without --offline the imager runs as it always has. With it, a card
@@ -636,7 +751,10 @@ function powershell.exe {
         for name, data in files.items():
             self.assertEqual((kit / name).read_bytes(), data)
         self.assertEqual((kit / 'test-lite.img.xz').read_bytes(), image.read_bytes())
+        for name in ('imager-test.AppImage', 'imager-test.exe'):
+            self.assertEqual((kit / 'tools' / name).read_bytes(), name.encode() * 8)
         self.assertIn('release 0.551', (kit / 'MANET-OFFLINE-KIT.txt').read_text())
+        self.assertIn('1.9 or later', (kit / 'MANET-OFFLINE-KIT.txt').read_text())
         self.events.write_text('')
         result = launch(self.cmd, MANET_MAKE_KIT=str(kit))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -650,6 +768,62 @@ function powershell.exe {
         result = launch(kit / 'Flash-a-Radio.cmd', TEST_OFFLINE='1')
         self.assertNotIn('RAN', result.stdout)
         self.assertIn('missing or damaged', result.stdout)
+
+    @unittest.skipUnless(PWSH, 'PowerShell is required for Windows engine execution tests')
+    def test_windows_kit_tools_are_checked_before_use(self):
+        kit = self.work / 'kit'
+        (kit / 'tools').mkdir(parents=True)
+        tools = self.kit_tools(kit / 'tools')
+        pins = self.work / 'flasher-tools.json'
+        pins.write_text(json.dumps({'files': tools}))
+        self.save()
+        script = self.windows_functions('Get-KitToolPath') + r'''
+$FLASHER_TOOLS_FILE = $env:TEST_PINS
+$found = Get-KitToolPath -Tool $env:TEST_TOOL
+Write-Output "FOUND=$(if ($found) { $found.Path + '|' + $found.Version } else { 'none' })"
+'''
+        exe = kit / 'tools' / 'imager-test.exe'
+        good = exe.read_bytes()
+        cases = (('rpi-imager', str(kit), None, f'FOUND={exe}|9.9'),
+                 ('rpiboot', str(kit), None, 'FOUND=none'),
+                 ('rpi-imager', '', None, 'FOUND=none'),
+                 ('rpi-imager', str(kit), b'damaged', 'damaged. Make the kit again'))
+        for tool, kit_dir, data, expected in cases:
+            with self.subTest(tool=tool, kit=bool(kit_dir), damaged=bool(data)):
+                exe.write_bytes(data or good)
+                result = self.run_pwsh(script, TEST_PINS=str(pins), TEST_TOOL=tool, MANET_KIT_DIR=kit_dir)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(expected, result.stdout)
+                if data:
+                    self.assertIn('FOUND=none', result.stdout)
+
+    @unittest.skipUnless(PWSH, 'PowerShell is required for Windows front end tests')
+    def test_windows_window_offers_an_imager_update_for_offline_setup(self):
+        """An imager that ejects the card is fine for a normal flash but gets
+        an Update button, and counts as missing when started for offline setup."""
+        script = self.work / 'prereq.ps1'
+        script.write_text(r'''
+$ErrorActionPreference = 'Stop'
+$tokens = $null; $errors = $null
+$ast = [Management.Automation.Language.Parser]::ParseFile($env:TEST_GUI, [ref]$tokens, [ref]$errors)
+$function = $ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Test-Prereq'}, $true)
+Invoke-Expression $function.Extent.Text
+function Find-InstalledProgram { 'C:\Imager\rpi-imager.exe' }
+function Get-RpiImagerExtraArgs { if ($env:TEST_KEEPS -eq '1') { @('--disable-eject') } else { @() } }
+$item = [pscustomobject]@{ Key = 'rpi-imager'; Found = $false; Upgrade = $false; Detail = ''; Path = $null }
+[void](Test-Prereq $item)
+Write-Output "FOUND=$($item.Found) UPGRADE=$($item.Upgrade) DETAIL=$($item.Detail)"
+''')
+        cases = (('1', '0', 'FOUND=True UPGRADE=False'), ('0', '0', 'FOUND=True UPGRADE=True'),
+                 ('0', '1', 'FOUND=False UPGRADE=True'), ('1', '1', 'FOUND=True UPGRADE=False'))
+        for keeps, offline, expected in cases:
+            with self.subTest(keeps=keeps, offline=offline):
+                result = subprocess.run([PWSH, '-NoProfile', '-File', str(script)], text=True, capture_output=True,
+                                        timeout=60, env=dict(self.environment, TEST_KEEPS=keeps, MANET_OFFLINE=offline,
+                                                             TEST_GUI=str(PROVISIONING / 'manet-flasher.ps1')))
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(expected, result.stdout)
+                self.assertEqual('1.9 or later' in result.stdout, keeps == '0')
 
     @unittest.skipUnless(PWSH, 'PowerShell is required for Windows template execution tests')
     def test_windows_offline_token_follows_the_option(self):

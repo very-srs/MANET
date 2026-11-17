@@ -404,6 +404,8 @@ function Get-PrereqList {
             Page     = 'https://www.raspberrypi.com/software/'
             File     = 'imager_latest.exe'
             Found    = $false
+            # Found, but too old for offline setup. See Test-Prereq.
+            Upgrade  = $false
             Detail   = ''
             Path     = $null
             Busy     = $false
@@ -494,8 +496,20 @@ function Test-Prereq {
                         'Raspberry Pi Imager\rpi-imager.exe',
                         'Raspberry Pi\Imager\rpi-imager.exe') `
                     -CacheKey 'rpi-imager'
-            $P.Path = $p1; $P.Found = [bool]$p1
+            $P.Path = $p1; $P.Found = [bool]$p1; $P.Upgrade = $false
             $P.Detail = if ($p1) { $p1 } else { 'not installed' }
+            # Offline setup copies files onto the card after the imager writes
+            # it, which an imager that ejects the card cannot do. Started for
+            # offline setup, or from a kit, that imager is not enough.
+            if ($p1 -and @(Get-RpiImagerExtraArgs $p1).Count -eq 0) {
+                $P.Upgrade = $true
+                if ($env:MANET_OFFLINE -eq '1') {
+                    $P.Found  = $false
+                    $P.Detail = "$p1 ejects the card when it finishes. Offline setup needs version 1.9 or later."
+                } else {
+                    $P.Detail = "$p1 (offline setup needs version 1.9 or later)"
+                }
+            }
         }
         'rpiboot' {
             $p1 = Find-InstalledProgram -CommandNames @('rpiboot.exe','rpiboot') `
@@ -1005,10 +1019,11 @@ function Update-PrereqRows {
         $row.Detail.ForeColor = $row.Mark.ForeColor
         $row.Bar.Visible      = $false
 
-        $row.Install.Visible = -not $item.Found
+        $row.Install.Visible = (-not $item.Found) -or [bool]$item.Upgrade
         $row.Locate.Visible  = -not $item.Found
         $row.Install.Enabled = $true
-        $row.Install.Text    = if ($item.Source -eq 'page') { 'Get it...' } else { 'Install it' }
+        $row.Install.Text    = if ($item.Source -eq 'page') { 'Get it...' }
+                               elseif ($item.Found) { 'Update it' } else { 'Install it' }
     }
     Update-Nav
 }
@@ -1052,10 +1067,22 @@ function Install-Prereq {
 
     if ($P.Busy) { return }
 
-    # A computer running an offline kit has no network to download from.
+    # A computer running an offline kit has no network to download from. The
+    # kit carries Raspberry Pi Imager and rpiboot installers instead.
     if ($env:MANET_KIT_DIR) {
-        $P.Ui.Detail.Text      = 'running from an offline kit: install this on the computer first'
-        $P.Ui.Detail.ForeColor = $Script:UI.Warn
+        $kitTool = Get-KitToolPath -Tool $P.Key
+        if (-not $kitTool) {
+            $P.Ui.Detail.Text      = 'running from an offline kit: install this on the computer first'
+            $P.Ui.Detail.ForeColor = $Script:UI.Warn
+            return
+        }
+        # A copy, because the installer file is deleted once it has run.
+        $copy = Join-Path ([System.IO.Path]::GetTempPath()) $kitTool.Name
+        Copy-Item -LiteralPath $kitTool.Path -Destination $copy -Force
+        Add-Log "Installing $($P.Name) $($kitTool.Version) from the offline kit"
+        $P.Busy = $true
+        $P.Ui.Install.Enabled = $false
+        Add-InstallerToQueue @{ Prereq = $P; Installer = $copy }
         return
     }
 
@@ -2183,8 +2210,9 @@ function Build-ConfirmPage {
 
     # Kept from card to card. --offline starts it ticked. A run from an
     # offline kit has no other choice, so it stays ticked there.
-    $Script:ChkOffline = New-Check ('Offline setup: put everything the radio needs on the card, ' +
-                                    'so it sets itself up without internet') 20 396 798 $Script:OFFLINE
+    $Script:OfflineCheckText = ('Offline setup: put everything the radio needs on the card, ' +
+                                'so it sets itself up without internet')
+    $Script:ChkOffline = New-Check $Script:OfflineCheckText 20 396 798 $Script:OFFLINE
     $p.Controls.Add($Script:ChkOffline)
 
     return $p
@@ -2239,13 +2267,21 @@ function Update-ConfirmPage {
     $Script:LblEraseWarn.Text = "Everything on disk $($d.Number) will be destroyed. This cannot be undone."
     $Script:ChkErase.Text     = "Yes, erase disk $($d.Number) ($($d.FriendlyName), $($d.SizeGB) GB)"
     $Script:ChkErase.Checked  = $false
-    # Offline bundles exist for the CM4's Raspberry Pi OS image only.
+    # Offline bundles exist for the CM4's Raspberry Pi OS image only, and need
+    # an imager that leaves the card attached.
+    $imager = ($Script:PrereqItems | Where-Object { $_.Key -eq 'rpi-imager' } | Select-Object -First 1)
+    $Script:ChkOffline.Text = $Script:OfflineCheckText
     if ($env:MANET_KIT_DIR) {
         $Script:ChkOffline.Checked = $true
         $Script:ChkOffline.Enabled = $false
     } elseif ($hw.Model -ne 'rpi4') {
         $Script:ChkOffline.Checked = $false
         $Script:ChkOffline.Enabled = $false
+    } elseif ($imager -and $imager.Upgrade) {
+        $Script:ChkOffline.Checked = $false
+        $Script:ChkOffline.Enabled = $false
+        $Script:ChkOffline.Text    = ('Offline setup needs Raspberry Pi Imager 1.9 or later. ' +
+                                      'Go back to the prerequisites and click Update it.')
     } else {
         $Script:ChkOffline.Enabled = $true
     }

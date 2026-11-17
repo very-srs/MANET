@@ -24,8 +24,13 @@ from manet_release import (API, DOWNLOADS, OFFLINE_BUNDLES, PACKAGES, TAG_PATTER
 PROVISIONING = (
     "flash-a-radio.sh", "linux-flasher.sh", "Flash a Radio.cmd", "windows.ps1",
     "manet-flasher.ps1", "prepare-release.py", "flash-target.py", "firstrun.sh.template",
-    "rock3a-provision.sh.template", "additional-scripts/README.md",
+    "rock3a-provision.sh.template", "additional-scripts/README.md", "flasher-tools.json",
 )
+# What an offline kit carries for the flashing computer, from flasher-tools.json.
+KIT_TOOLS = {("rpi-imager", "linux-x86_64"), ("rpi-imager", "linux-aarch64"),
+             ("rpi-imager", "windows"), ("rpiboot", "windows")}
+TOOL_URL = re.compile(r"https://github\.com/raspberrypi/(?:rpi-imager|usbboot)/releases/download/"
+                      r"[A-Za-z0-9._-]+/([A-Za-z0-9._-]+)")
 
 
 def git(*args):
@@ -86,6 +91,23 @@ def check_offline_bundle(path, expected):
     return {key: image[key] for key in ("url", "sha256", "size")}
 
 
+def check_flasher_tools(text):
+    """Check the programs an offline kit carries: Raspberry Pi Imager for each
+    platform a flasher unpacks or installs it on, and rpiboot for Windows,
+    each a GitHub release file pinned by name, size and SHA-256."""
+    seen = set()
+    for item in json.loads(text)["files"]:
+        match = TOOL_URL.fullmatch(item.get("url", ""))
+        if (not match or match[1] != item.get("name")
+                or not re.fullmatch(r"[a-f0-9]{64}", item.get("sha256", ""))
+                or type(item.get("size")) is not int or not 0 < item["size"] <= 256 * 2**20
+                or not item.get("version")):
+            raise ValueError(f"Invalid program in flasher-tools.json: {item.get('name')}")
+        seen.add((item.get("tool"), item.get("platform")))
+    if seen != KIT_TOOLS:
+        raise ValueError("flasher-tools.json must list exactly the programs an offline kit carries")
+
+
 def build_assets(packages, output):
     if git("status", "--porcelain", "--untracked-files=no").strip():
         raise ValueError("Commit the source changes before publishing")
@@ -108,6 +130,7 @@ def build_assets(packages, output):
         paths.append(packages / name)
     if any(image != images[0] for image in images):
         raise ValueError("Offline bundles were built for different images")
+    check_flasher_tools(git("show", "HEAD:MANET/provisioning/flasher-tools.json"))
     bundle = output / "manet-flasher.zip"
     with zipfile.ZipFile(bundle, "w", zipfile.ZIP_DEFLATED) as archive:
         for name in PROVISIONING:

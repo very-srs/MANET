@@ -112,6 +112,27 @@ function Save-KitFile($kit, $name, $url, $size, $sha256) {
     Move-Item -LiteralPath $partial -Destination $target -Force
 }
 
+# The programs pinned in a verified flasher ZIP: Raspberry Pi Imager for
+# Linux and Windows, and rpiboot for Windows.
+function Get-KitTools($bundle, $version) {
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $archive = [IO.Compression.ZipFile]::OpenRead($bundle)
+    try {
+        $entry = $archive.GetEntry('flasher-tools.json')
+        if (-not $entry) { throw "Release $version does not name the programs a kit carries. Use a newer release." }
+        $reader = New-Object IO.StreamReader($entry.Open())
+        try { $pins = $reader.ReadToEnd() | ConvertFrom-Json } finally { $reader.Dispose() }
+    } finally { $archive.Dispose() }
+    foreach ($item in @($pins.files)) {
+        if ($item.url -notmatch '^https://github\.com/raspberrypi/(?:rpi-imager|usbboot)/releases/download/[A-Za-z0-9._-]+/([A-Za-z0-9._-]+)$' -or
+                $Matches[1] -ne $item.name -or $item.sha256 -notmatch '^[a-f0-9]{64}$' -or
+                -not ($item.size -is [int] -or $item.size -is [long]) -or $item.size -le 0 -or $item.size -gt 268435456) {
+            throw "Invalid program in the flasher's flasher-tools.json."
+        }
+    }
+    return @($pins.files)
+}
+
 # Fill a folder, such as a USB stick, with the launchers, setup scripts, image
 # and packages for one release, so a computer without internet can flash CM4
 # radios from it. Writing a folder needs no administrator access.
@@ -132,15 +153,23 @@ function New-OfflineKit($kit) {
         Save-KitFile $kit $name "$base/download/$($manifest.tag)/$name" $asset.size $asset.sha256
     }
     Save-KitFile $kit $offline.ImageName $offline.Image.url $offline.Image.size $offline.Image.sha256
+    $tools = Join-Path $kit 'tools'
+    New-Item -ItemType Directory -Path $tools -Force | Out-Null
+    foreach ($item in (Get-KitTools (Join-Path $kit 'manet-flasher.zip') $manifest.version)) {
+        Save-KitFile $tools $item.name $item.url $item.size $item.sha256
+    }
     Save-Manifest $manifest (Join-Path $kit 'manet-release.json')
     $text = "MANET offline kit, release $($manifest.version)`r`n`r`n" +
         "This folder holds everything needed to flash CM4 radios that set`r`n" +
         "themselves up without internet, on a computer with no network.`r`n`r`n" +
         "Linux:   bash flash-a-radio.sh`r`n" +
         "Windows: double-click Flash-a-Radio.cmd`r`n`r`n" +
-        "The computer needs Raspberry Pi Imager and rpiboot installed. Windows`r`n" +
-        "needs Raspberry Pi Imager 2.0 or later. Saved settings are kept in a`r`n" +
-        "folder here.`r`n"
+        "Offline setup needs Raspberry Pi Imager 1.9 or later, and rpiboot for`r`n" +
+        "a CM4. The tools folder holds Raspberry Pi Imager for Linux and`r`n" +
+        "Windows, and rpiboot for Windows. The flasher uses or offers them`r`n" +
+        "when this computer does not have them. On Linux, install rpiboot`r`n" +
+        "before this computer goes offline (Debian and Ubuntu: apt install`r`n" +
+        "rpiboot). Saved settings are kept in a folder here.`r`n"
     [IO.File]::WriteAllText((Join-Path $kit $kitMarker), $text)
     Write-Host "Offline kit for release $($manifest.version) is ready in $kit"
 }

@@ -1,0 +1,41 @@
+{
+  "comment": "Programs an offline kit carries for the computer that flashes radios. Linux also downloads its rpi-imager from here. Offline setup needs rpi-imager 1.9 or later, which can leave the card attached after writing it.",
+  "files": [
+    {
+      "tool": "rpi-imager",
+      "version": "2.0.12",
+      "platform": "linux-x86_64",
+      "name": "Raspberry_Pi_Imager-v2.0.12-desktop-x86_64.AppImage",
+      "url": "https://github.com/raspberrypi/rpi-imager/releases/download/v2.0.12/Raspberry_Pi_Imager-v2.0.12-desktop-x86_64.AppImage",
+      "size": 35154424,
+      "sha256": "9589b1619b12008de8d2ed9e928d8d58901c1013f3305091c5cc238a5c9691e5"
+    },
+    {
+      "tool": "rpi-imager",
+      "version": "2.0.12",
+      "platform": "linux-aarch64",
+      "name": "Raspberry_Pi_Imager-v2.0.12-desktop-aarch64.AppImage",
+      "url": "https://github.com/raspberrypi/rpi-imager/releases/download/v2.0.12/Raspberry_Pi_Imager-v2.0.12-desktop-aarch64.AppImage",
+      "size": 35355144,
+      "sha256": "9f499de3d44d2cd67fcc7d633f2b4607058a597811c467a6574f0f5bddf37424"
+    },
+    {
+      "tool": "rpi-imager",
+      "version": "2.0.12",
+      "platform": "windows",
+      "name": "imager-v2.0.12.exe",
+      "url": "https://github.com/raspberrypi/rpi-imager/releases/download/v2.0.12/imager-v2.0.12.exe",
+      "size": 22315568,
+      "sha256": "98bff90afe23339d0768915f6f68d35ac254740ec1eac2082ebeaa9ba41bc8e3"
+    },
+    {
+      "tool": "rpiboot",
+      "version": "windows-v1.1",
+      "platform": "windows",
+      "name": "rpiboot_setup.exe",
+      "url": "https://github.com/raspberrypi/usbboot/releases/download/windows-v1.1/rpiboot_setup.exe",
+      "size": 34282704,
+      "sha256": "4f700ef27909a543051270153ac238f48dee91736ecfa558b6c94f1184d66c15"
+    }
+  ]
+}

@@ -22,6 +22,9 @@ BASE = f"https://github.com/{REPO}/releases"
 KIT_MARKER = "MANET-OFFLINE-KIT.txt"
 # Offline setup covers the CM4, the board with an offline bundle.
 KIT_BOARD = "cm4"
+# Programs a kit carries for the flashing computer, pinned in the flasher ZIP.
+TOOL_URL = re.compile(r"https://github\.com/raspberrypi/(?:rpi-imager|usbboot)/releases/download/"
+                      r"[A-Za-z0-9._-]+/([A-Za-z0-9._-]+)")
 parser = argparse.ArgumentParser(description="Image a MANET node using the latest stable release")
 parser.add_argument("--development", action="store_true", help="test the newest published build, including prereleases")
 parser.add_argument("--local-scripts", action="store_true", help="use setup scripts from this checkout with the selected release packages")
@@ -137,6 +140,22 @@ def fetch_into(kit, name, url, size, digest):
     partial.replace(target)
 
 
+def kit_tools(bundle, version):
+    """The programs pinned in a verified flasher ZIP: Raspberry Pi Imager for
+    Linux and Windows, and rpiboot for Windows."""
+    with zipfile.ZipFile(bundle) as archive:
+        if "flasher-tools.json" not in archive.namelist():
+            raise ValueError(f"Release {version} does not name the programs a kit carries. Use a newer release")
+        pins = json.loads(archive.read("flasher-tools.json"))
+    for item in pins["files"]:
+        match = TOOL_URL.fullmatch(item.get("url", ""))
+        if (not match or match[1] != item.get("name")
+                or not re.fullmatch(r"[a-f0-9]{64}", item.get("sha256", ""))
+                or type(item.get("size")) is not int or not 0 < item["size"] <= 256 * 2**20):
+            raise ValueError("Invalid program in the flasher's flasher-tools.json")
+    return pins["files"]
+
+
 def make_kit(kit):
     """Fill kit with the launchers, setup scripts, image and packages for one
     release, so a computer without internet can flash CM4 radios from it."""
@@ -154,6 +173,10 @@ def make_kit(kit):
             asset = manifest["assets"][name]
             fetch_into(kit, name, BASE + f"/download/{manifest['tag']}/{name}", asset["size"], asset["sha256"])
         fetch_into(kit, image_name, image["url"], image["size"], image["sha256"])
+        tools = kit / "tools"
+        tools.mkdir(exist_ok=True)
+        for item in kit_tools(kit / "manet-flasher.zip", manifest["version"]):
+            fetch_into(tools, item["name"], item["url"], item["size"], item["sha256"])
         shutil.copyfile(manifest_file, kit / "manet-release.json")
     try:
         (kit / "flash-a-radio.sh").chmod(0o755)
@@ -165,9 +188,12 @@ def make_kit(kit):
         "themselves up without internet, on a computer with no network.\n\n"
         "Linux:   bash flash-a-radio.sh\n"
         "Windows: double-click Flash-a-Radio.cmd\n\n"
-        "The computer needs Raspberry Pi Imager and rpiboot installed. Windows\n"
-        "needs Raspberry Pi Imager 2.0 or later. Saved settings are kept in\n"
-        "the manet-flasher folder here.\n")
+        "Offline setup needs Raspberry Pi Imager 1.9 or later, and rpiboot for\n"
+        "a CM4. The tools folder holds Raspberry Pi Imager for Linux and\n"
+        "Windows, and rpiboot for Windows. The flasher uses or offers them\n"
+        "when this computer does not have them. On Linux, install rpiboot\n"
+        "before this computer goes offline (Debian and Ubuntu: apt install\n"
+        "rpiboot). Saved settings are kept in the manet-flasher folder here.\n")
     print(f"Offline kit for release {manifest['version']} is ready in {kit}")
     return 0
 
