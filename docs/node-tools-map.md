@@ -230,6 +230,7 @@ Read [first boot](guide/content/first-boot.md), [updates](guide/content/updates.
 | [manet_release.py](../MANET/node_tools/manet_release.py) | Select a published stable/development release and validate its manifest. |
 | [node-update.sh](../MANET/node_tools/node-update.sh) | Enter the Python updater or resume using the retained recovery copy. |
 | [node-update.py](../MANET/node_tools/node-update.py) | Verify, stage, replace, and activate an update with durable recovery state. |
+| [manet-update-oneshot.sh](../MANET/node_tools/manet-update-oneshot.sh) | Apply each release's idempotent one-off fix-ups after the payload installs and before services restart. |
 | [manet-release-bootstrap.py](../MANET/node_tools/manet-release-bootstrap.py) | Apply an embedded CM4 archive after the legacy updater finishes, retaining recovery until kernel confirmation. |
 | [manet-release-setup.py](../MANET/node_tools/manet-release-setup.py) | Verify and install the native follower hostapd package, APT pin, and regulatory database. |
 | [manet_kernel_update.py](../MANET/node_tools/manet_kernel_update.py) | Validate matched kernel inputs, derive local CM4 field profiles, honor operator opt-out, and manage trial health, confirmation, and fallback. |
